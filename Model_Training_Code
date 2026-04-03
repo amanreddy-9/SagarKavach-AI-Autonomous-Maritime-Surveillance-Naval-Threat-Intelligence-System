@@ -1,0 +1,100 @@
+from ultralytics import YOLO
+from pathlib import Path
+import shutil
+import torch
+
+
+def main():
+    PROJECT_DIR = Path(r"E:\CV PROJECT SEM 6")
+    RUN_NAME    = "naval_model"
+    RUNS_DIR    = PROJECT_DIR / "runs"
+
+    if torch.cuda.is_available():
+        device = 0
+        print(f"\nGPU detected : {torch.cuda.get_device_name(0)}")
+    else:
+        device = "cpu"
+        print("\nRunning on CPU")
+
+    model = YOLO("yolov8m-obb.pt")
+
+    print("\nTraining started\n")
+
+    model.train(
+        data     = r"E:\CV PROJECT SEM 6\data.yaml",
+        epochs   = 60,
+        imgsz    = 416,
+        batch    = 4,
+        device   = device,
+        workers  = 0,
+        cache    = True,
+        patience = 30,
+        pretrained = True,
+        verbose  = True,
+        amp      = False,
+        project  = str(RUNS_DIR),
+        name     = RUN_NAME,
+        plots    = True,
+        save     = True,
+        exist_ok = True,
+    )
+
+    best_model_src = RUNS_DIR / RUN_NAME / "weights" / "best.pt"
+    best_model_dst = PROJECT_DIR / "best_naval_model.pt"
+
+    if best_model_src.exists():
+        shutil.copy(best_model_src, best_model_dst)
+        print(f"\nBest model saved to: {best_model_dst}")
+    else:
+        print("\nWARNING: best.pt not found — using last.pt instead")
+        last_src = RUNS_DIR / RUN_NAME / "weights" / "last.pt"
+        if last_src.exists():
+            shutil.copy(last_src, best_model_dst)
+            print(f"Copied last.pt to: {best_model_dst}")
+        else:
+            print("ERROR: No weights found at all. Training may have crashed.")
+            return
+
+    best_model = YOLO(str(best_model_dst))
+
+    metrics = best_model.val(
+        data  = r"E:\CV PROJECT SEM 6\data.yaml",
+        split = "test",
+        plots = True,
+        imgsz = 416,
+        workers=0
+    )
+
+    metric_obj = metrics.obb if hasattr(metrics, "obb") else metrics.box
+
+    precision = metric_obj.mp
+    recall = metric_obj.mr
+    map50 = metric_obj.map50
+    map95 = metric_obj.map
+    f1 = 2 * (precision * recall) / (precision + recall + 1e-6)
+    accuracy = map50
+
+    print("\n========== FINAL RESULTS ==========")
+    print(f"Accuracy     : {accuracy:.4f}")
+    print(f"Precision    : {precision:.4f}")
+    print(f"Recall       : {recall:.4f}")
+    print(f"F1 Score     : {f1:.4f}")
+    print(f"mAP50        : {map50:.4f}")
+    print(f"mAP50-95     : {map95:.4f}")
+    print("====================================")
+
+    print("\nVisual outputs saved automatically in:")
+    print(metrics.save_dir)
+
+    print("\nFiles generated:")
+    print("confusion_matrix.png")
+    print("PR_curve.png")
+    print("val_loss_curve")
+    print("training_loss_curve")
+    print("P_curve.png")
+    print("R_curve.png")
+    print("results.csv")
+
+
+if __name__ == "__main__":
+    main()
