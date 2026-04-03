@@ -1,0 +1,499 @@
+"""
+╔══════════════════════════════════════════════════════════╗
+║         NAVAL THREAT DETECTION SYSTEM v3.0               ║
+║         YOLOv8-OBB · CLASSIFIED · RESTRICTED USE        ║
+╚══════════════════════════════════════════════════════════╝
+"""
+
+from ultralytics import YOLO
+import cv2
+import numpy as np
+import time
+import math
+
+
+# ==========================================
+# CONFIGURATION  — edit these 3 paths only
+# ==========================================
+
+MODEL_PATH   = r"E:\CV PROJECT SEM 6\best_naval_model.pt"
+INPUT_VIDEO  = r"E:\CV PROJECT SEM 6\aircraft_new.mp4"
+OUTPUT_VIDEO = r"E:\CV PROJECT SEM 6\aircraft_output.mp4"
+CONFIDENCE   = 0.35
+INFER_IMGSZ  = 416          # must match training
+
+
+# ==========================================
+# THREAT REGISTRY
+# ==========================================
+
+THREAT_MAP = {
+    "aircraft_carrier": {
+        "level"   : "CRITICAL",
+        "msg"     : "AIRCRAFT CARRIER INBOUND -- EXTREME THREAT",
+        "code"    : "CVN",
+        "color"   : (0, 0, 220),
+        "priority": 1,
+    },
+    "destroyer": {
+        "level"   : "HIGH",
+        "msg"     : "DESTROYER INBOUND -- HIGH THREAT",
+        "code"    : "DDG",
+        "color"   : (0, 80, 255),
+        "priority": 2,
+    },
+    "submarine": {
+        "level"   : "HIGH",
+        "msg"     : "SUBMARINE CONTACT -- SUBMERGED / HIGH THREAT",
+        "code"    : "SSN",
+        "color"   : (180, 0, 180),
+        "priority": 2,
+    },
+    "corvette": {
+        "level"   : "MODERATE",
+        "msg"     : "CORVETTE INBOUND -- MODERATE THREAT",
+        "code"    : "CVT",
+        "color"   : (0, 180, 255),
+        "priority": 3,
+    },
+    "frigate": {
+        "level"   : "MODERATE",
+        "msg"     : "FRIGATE INBOUND -- MODERATE THREAT",
+        "code"    : "FFG",
+        "color"   : (0, 200, 200),
+        "priority": 3,
+    },
+    "warship": {
+        "level"   : "MODERATE",
+        "msg"     : "WARSHIP INBOUND -- MODERATE THREAT",
+        "code"    : "WS",
+        "color"   : (0, 200, 200),
+        "priority": 3,
+    },
+    "patrol": {
+        "level"   : "LOW",
+        "msg"     : "PATROL VESSEL DETECTED -- MONITORING",
+        "code"    : "PB",
+        "color"   : (50, 220, 50),
+        "priority": 4,
+    },
+}
+
+DEFAULT_THREAT = {
+    "level"   : "UNKNOWN",
+    "msg"     : "UNIDENTIFIED VESSEL -- ASSESS IMMEDIATELY",
+    "code"    : "UNK",
+    "color"   : (180, 180, 0),
+    "priority": 5,
+}
+
+# Palette
+HUD_GREEN = (0, 230, 80)
+HUD_DIM   = (0, 110, 35)
+HUD_RED   = (0, 0, 220)
+HUD_AMBER = (0, 180, 255)
+
+F  = cv2.FONT_HERSHEY_DUPLEX
+FM = cv2.FONT_HERSHEY_COMPLEX_SMALL
+
+
+# ==========================================
+# HELPERS
+# ==========================================
+
+def get_threat(class_name: str) -> dict:
+    key = class_name.strip().lower()
+    for k, v in THREAT_MAP.items():
+        if k in key or key in k:
+            return v
+    return DEFAULT_THREAT
+
+
+def draw_obb_box(frame, pts, color, label, conf):
+    pts = pts.astype(np.int32)
+    poly = pts.reshape((-1, 1, 2))
+
+    # glow outline
+    cv2.polylines(frame, [poly], True,
+                  tuple(max(0, c // 4) for c in color), 5, cv2.LINE_AA)
+    # main box
+    cv2.polylines(frame, [poly], True, color, 2, cv2.LINE_AA)
+    # corner dots
+    for pt in pts:
+        cv2.circle(frame, tuple(pt), 4, color, -1, cv2.LINE_AA)
+
+    # label ribbon
+    x0, y0 = pts[0]
+    ribbon = f" {label.upper()}  {conf:.0%} "
+    (tw, th), _ = cv2.getTextSize(ribbon, FM, 0.55, 1)
+    ry = max(y0 - th - 8, 4)
+    cv2.rectangle(frame, (x0, ry), (x0 + tw + 4, ry + th + 8), color, -1)
+    cv2.putText(frame, ribbon, (x0 + 2, ry + th + 2),
+                FM, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+
+
+def draw_grid(frame, alpha=0.07):
+    h, w = frame.shape[:2]
+    overlay = np.zeros_like(frame)
+    for x in range(0, w, 60):
+        cv2.line(overlay, (x, 0), (x, h), HUD_DIM, 1)
+    for y in range(0, h, 60):
+        cv2.line(overlay, (0, y), (w, y), HUD_DIM, 1)
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+
+def scanlines(frame, alpha=0.04):
+    h, w = frame.shape[:2]
+    overlay = frame.copy()
+    for y in range(0, h, 4):
+        cv2.line(overlay, (0, y), (w, y), (0, 0, 0), 1)
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+
+def rotating_reticle(frame, cx, cy, r, angle, color):
+    for offset in [0, 90, 180, 270]:
+        a  = math.radians(angle + offset)
+        x1 = int(cx + r * math.cos(a))
+        y1 = int(cy + r * math.sin(a))
+        x2 = int(cx + (r + 14) * math.cos(a))
+        y2 = int(cy + (r + 14) * math.sin(a))
+        cv2.line(frame, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), r,     color, 1, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), r + 6, color, 1, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), 3,     color, -1, cv2.LINE_AA)
+
+
+# ==========================================
+# TACTICAL HUD
+# ==========================================
+
+class TacticalHUD:
+    def __init__(self, fw, fh):
+        self.fw, self.fh = fw, fh
+        self.pw = 310
+        self.ph = 310
+        self.px = fw - self.pw - 18
+        self.py = 18
+        self.frame_count = 0
+        self.blink        = True
+        self.blink_timer  = 0
+        self.fps          = 0.0
+        self.elapsed      = 0.0
+        self.current      = None
+        self.log: list    = []
+
+    def update(self, detections, fps, elapsed):
+        self.frame_count += 1
+        self.fps     = fps
+        self.elapsed = elapsed
+        self.blink_timer += 1
+        if self.blink_timer > max(1, int(fps * 0.5)):
+            self.blink = not self.blink
+            self.blink_timer = 0
+
+        for d in detections:
+            self.log.insert(0, {**d, "ts": elapsed})
+        self.log = self.log[:5]
+
+        self.current = (
+            min(detections, key=lambda d: d["threat"]["priority"])
+            if detections else None
+        )
+
+    def draw(self, frame):
+        px, py, pw, ph = self.px, self.py, self.pw, self.ph
+        angle = (self.frame_count * 1.8) % 360
+
+        # panel background
+        ov = frame.copy()
+        cv2.rectangle(ov, (px, py), (px + pw, py + ph), (0, 18, 0), -1)
+        cv2.addWeighted(ov, 0.80, frame, 0.20, 0, frame)
+
+        # border
+        cv2.rectangle(frame, (px, py), (px + pw, py + ph), HUD_GREEN, 1)
+        cv2.rectangle(frame, (px+4, py+4), (px+pw-4, py+ph-4), HUD_DIM, 1)
+
+        # corner ticks
+        L = 16
+        for (cx_, cy_, sx, sy) in [
+            (px, py, 1, 1), (px+pw, py, -1, 1),
+            (px, py+ph, 1, -1), (px+pw, py+ph, -1, -1)
+        ]:
+            cv2.line(frame, (cx_, cy_), (cx_+sx*L, cy_), HUD_GREEN, 2)
+            cv2.line(frame, (cx_, cy_), (cx_, cy_+sy*L), HUD_GREEN, 2)
+
+        # header
+        hy = py + 26
+        cv2.putText(frame, "[ NAVAL THREAT ANALYSIS SYSTEM ]",
+                    (px+10, hy), FM, 0.46, HUD_GREEN, 1, cv2.LINE_AA)
+        cv2.line(frame, (px+8, hy+7), (px+pw-8, hy+7), HUD_DIM, 1)
+
+        # reticle
+        rotating_reticle(frame, px+36, py+82, 20, angle, HUD_GREEN)
+
+        # status row
+        sy0 = py + 52
+        m = int(self.elapsed // 60)
+        s = int(self.elapsed % 60)
+        cv2.putText(frame, f"TIME: {m:02d}:{s:02d}",
+                    (px+68, sy0), FM, 0.48, HUD_DIM, 1, cv2.LINE_AA)
+        cv2.putText(frame, f"FPS: {self.fps:4.1f}",
+                    (px+210, sy0), FM, 0.48, HUD_DIM, 1, cv2.LINE_AA)
+        cv2.putText(frame, f"FRAME: {self.frame_count:06d}",
+                    (px+68, sy0+18), FM, 0.48, HUD_DIM, 1, cv2.LINE_AA)
+
+        # divider
+        sy1 = py + 108
+        cv2.putText(frame, "-- ACTIVE CONTACT --",
+                    (px+12, sy1), FM, 0.48, HUD_DIM, 1, cv2.LINE_AA)
+
+        if self.current:
+            t    = self.current["threat"]
+            lvl  = t["level"]
+            col  = t["color"]
+
+            # threat level badge color
+            badge_col = {
+                "CRITICAL": HUD_RED,
+                "HIGH"    : (0, 80, 255),
+                "MODERATE": HUD_AMBER,
+                "LOW"     : HUD_GREEN,
+            }.get(lvl, HUD_DIM)
+
+            # threat badge bar
+            cv2.rectangle(frame,
+                          (px+12, sy1+8), (px+pw-12, sy1+28),
+                          badge_col, -1)
+            cv2.putText(frame, f"  THREAT LEVEL: {lvl}",
+                        (px+14, sy1+23), FM, 0.50, (0, 0, 0), 1, cv2.LINE_AA)
+
+            # blinking alert lines — single block, no duplicates
+            alert_col = badge_col if not (lvl == "CRITICAL" and not self.blink) \
+                        else HUD_DIM
+            cv2.putText(frame, "NAVAL VESSEL DETECTED",
+                        (px+12, sy1+48), FM, 0.56, alert_col, 1, cv2.LINE_AA)
+            cv2.putText(frame, "ALERT COASTAL COMMAND !!!",
+                        (px+12, sy1+66), FM, 0.50, alert_col, 1, cv2.LINE_AA)
+
+            # class + code
+            cv2.putText(frame,
+                        f"{t['code']}  {self.current['class'].upper()}",
+                        (px+12, sy1+90), F, 0.52, col, 1, cv2.LINE_AA)
+
+            # confidence bar
+            conf  = self.current["conf"]
+            bx, by_ = px+12, sy1+100
+            bw = pw - 24
+            cv2.rectangle(frame, (bx, by_), (bx+bw, by_+10), HUD_DIM, -1)
+            cv2.rectangle(frame, (bx, by_),
+                          (bx+int(bw*conf), by_+10), col, -1)
+            cv2.putText(frame, f"CONF: {conf:.1%}",
+                        (bx, by_+24), FM, 0.46, HUD_GREEN, 1, cv2.LINE_AA)
+
+        else:
+            # no contact — blinking clear
+            c = HUD_DIM if not self.blink else HUD_GREEN
+            cv2.putText(frame, "  NO CONTACTS DETECTED",
+                        (px+12, sy1+30), FM, 0.52, c, 1, cv2.LINE_AA)
+            cv2.putText(frame, "  AREA CLEAR -- CONTINUE SWEEP",
+                        (px+12, sy1+52), FM, 0.44, HUD_DIM, 1, cv2.LINE_AA)
+
+        # contact log — shifted lower for clean spacing
+        ly = py + 255
+        cv2.line(frame, (px+8, ly-8), (px+pw-8, ly-8), HUD_DIM, 1)
+        cv2.putText(frame, "-- CONTACT LOG --",
+                    (px+12, ly+4), FM, 0.44, HUD_DIM, 1, cv2.LINE_AA)
+        for i, e in enumerate(self.log[:4]):
+            t2 = e["threat"]
+            ey = ly + 20 + i*18
+            cv2.putText(frame,
+                f"  [{e['ts']:05.1f}s] {t2['code']:<4} "
+                f"{e['class']:<14} {e['conf']:.0%}",
+                (px+8, ey), FM, 0.38, HUD_DIM, 1, cv2.LINE_AA)
+
+        # footer
+        cv2.putText(frame,
+                    "STATUS: ONLINE  |  ENCRYPTED  |  NOMINAL",
+                    (px+10, py+ph-10), FM, 0.36, HUD_DIM, 1, cv2.LINE_AA)
+
+
+# ==========================================
+# ALERT BANNER
+# ==========================================
+
+class AlertBanner:
+    def __init__(self):
+        self.queue     = []
+        self.current   = None
+        self.show_until = 0.0
+
+    def push(self, msg, color, level, ts):
+        self.queue.append(
+            {"msg": msg, "color": color, "level": level, "ts": ts}
+        )
+
+    def draw(self, frame, elapsed):
+        if elapsed > self.show_until and self.queue:
+            self.current    = self.queue.pop(0)
+            self.show_until = elapsed + 3.5
+
+        if not self.current or elapsed > self.show_until:
+            return
+
+        h, w   = frame.shape[:2]
+        col    = self.current["color"]
+        bh     = 44
+        by     = h - 72
+
+        ov = frame.copy()
+        cv2.rectangle(ov, (0, by), (w, by+bh), (0, 12, 0), -1)
+        cv2.addWeighted(ov, 0.78, frame, 0.22, 0, frame)
+        cv2.line(frame, (0, by),    (w, by),    col, 2)
+        cv2.line(frame, (0, by+bh), (w, by+bh), col, 2)
+
+        txt = f"  ** {self.current['level']} **  {self.current['msg']}  **"
+        (tw, th), _ = cv2.getTextSize(txt, F, 0.60, 1)
+        cv2.putText(frame, txt, (w//2 - tw//2, by + th + 10),
+                    F, 0.60, col, 1, cv2.LINE_AA)
+
+
+# ==========================================
+# FRAME CHROME
+# ==========================================
+
+def draw_chrome(frame, frame_idx):
+    h, w = frame.shape[:2]
+    cv2.putText(frame, "// CLASSIFIED // RESTRICTED //",
+                (12, 22), FM, 0.46, HUD_DIM, 1, cv2.LINE_AA)
+    tag = "<<  OPERATION : NAVAL WATCH  >>"
+    (tw, _), _ = cv2.getTextSize(tag, FM, 0.50, 1)
+    cv2.putText(frame, tag, (w//2 - tw//2, 22),
+                FM, 0.50, HUD_GREEN, 1, cv2.LINE_AA)
+    cv2.putText(frame, "LAT 000.000N  LON 000.000E  ALT 00000FT",
+                (12, h-12), FM, 0.43, HUD_DIM, 1, cv2.LINE_AA)
+    fc = f"FRAME {frame_idx:06d}"
+    (fw2, _), _ = cv2.getTextSize(fc, FM, 0.43, 1)
+    cv2.putText(frame, fc, (w - fw2 - 12, h-12),
+                FM, 0.43, HUD_DIM, 1, cv2.LINE_AA)
+
+
+# ==========================================
+# MAIN
+# ==========================================
+
+def run():
+    print("\n" + "="*56)
+    print("  NAVAL THREAT DETECTION SYSTEM  v3.0")
+    print("  Loading model ...")
+    print("="*56)
+
+    model = YOLO(MODEL_PATH)
+    print(f"  Task   : {model.task}")
+    print(f"  Classes: {model.names}\n")
+
+    cap = cv2.VideoCapture(INPUT_VIDEO)
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Cannot open: {INPUT_VIDEO}")
+
+    fps_src = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    W       = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    H       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    out = cv2.VideoWriter(
+        OUTPUT_VIDEO,
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps_src, (W, H)
+    )
+
+    hud    = TacticalHUD(W, H)
+    banner = AlertBanner()
+    seen   : set = set()
+
+    frame_idx = 0
+    t0        = time.time()
+    fps_disp  = fps_src
+
+    print(f"  Input  : {INPUT_VIDEO}")
+    print(f"  Output : {OUTPUT_VIDEO}")
+    print(f"  Res    : {W}x{H}  @  {fps_src:.1f} fps  |  {total} frames")
+    print(f"  imgsz  : {INFER_IMGSZ}  |  conf: {CONFIDENCE}\n")
+    print("  Processing ...\n")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        elapsed = frame_idx / fps_src
+
+        # inference
+        results = model.predict(
+            frame,
+            imgsz   = INFER_IMGSZ,
+            conf    = CONFIDENCE,
+            iou     = 0.45,
+            half    = False,
+            verbose = False,
+        )
+
+        detections = []
+
+        for r in results:
+            if r.obb is None or len(r.obb) == 0:
+                continue
+
+            boxes   = r.obb.xyxyxyxy.cpu().numpy()   # (N, 4, 2)
+            confs   = r.obb.conf.cpu().numpy()
+            cls_ids = r.obb.cls.cpu().numpy().astype(int)
+
+            for i, (conf, cid) in enumerate(zip(confs, cls_ids)):
+                cls_name = r.names.get(cid, f"class_{cid}")
+                threat   = get_threat(cls_name)
+                pts      = boxes[i].astype(np.int32)   # (4, 2)
+
+                detections.append({
+                    "class" : cls_name,
+                    "conf"  : float(conf),
+                    "threat": threat,
+                })
+
+                draw_obb_box(frame, pts, threat["color"], cls_name, float(conf))
+
+                if cls_name not in seen:
+                    seen.add(cls_name)
+                    banner.push(threat["msg"], threat["color"],
+                                threat["level"], elapsed)
+
+        # overlays
+        draw_grid(frame)
+        scanlines(frame)
+        draw_chrome(frame, frame_idx)
+
+        fps_disp = frame_idx / max(time.time() - t0, 1e-6)
+        hud.update(detections, fps_disp, elapsed)
+        hud.draw(frame)
+        banner.draw(frame, elapsed)
+
+        out.write(frame)
+        frame_idx += 1
+
+        if frame_idx % 60 == 0:
+            pct = frame_idx / max(total, 1) * 100
+            print(f"  [{pct:5.1f}%]  frame {frame_idx}/{total}"
+                  f"  fps {fps_disp:.1f}"
+                  f"  contacts: {len(detections)}")
+
+    cap.release()
+    out.release()
+
+    dur = time.time() - t0
+    print(f"\n  COMPLETE -- {frame_idx} frames in {dur:.1f}s")
+    print(f"  Saved -> {OUTPUT_VIDEO}\n")
+    print("="*56)
+    print("  MISSION COMPLETE")
+    print("="*56)
+
+
+if __name__ == "__main__":
+    run()
