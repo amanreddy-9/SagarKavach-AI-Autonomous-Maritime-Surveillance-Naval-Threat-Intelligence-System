@@ -1,0 +1,24 @@
+## 📊 Naval Warship OBB Dataset (4 Classes)
+
+To support training and reproducibility, a **preprocessed and augmented sample dataset** has been provided. The dataset is annotated using **Oriented Bounding Boxes (OBB)** and contains four naval warship classes:
+
+- Aircraft Carrier  
+- Destroyer  
+- Corvette  
+- Submarine  
+
+The dataset has been carefully curated from multiple sources and further enhanced using preprocessing and augmentation techniques including rotation, scaling, brightness adjustment, and orientation-based transformations. These augmentations improve model robustness under diverse maritime conditions such as varying angles, lighting, and background complexity.
+
+Due to repository size limitations, a **sample version of the preprocessed and augmented dataset** has been uploaded to Kaggle.
+
+📎 **Kaggle Dataset Link:**  https://www.kaggle.com/datasets/amanreddyj/naval-warship-yolo-obb-dataset
+
+
+This dataset is provided to help users:
+
+- Understand dataset structure  
+- Train the model  
+- Reproduce results  
+- Perform further experimentation  
+
+For full dataset access or additional information, please refer to the Kaggle link above.
