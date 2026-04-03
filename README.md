@@ -5,7 +5,7 @@
 The name **SagarKavach** is derived from two Sanskrit words:
 
 - **Sagar (सागर)** — Ocean / Sea  
-- **Kavach (कवच)** — Shield / Protection / Defense Armor  
+- **Kavach (कवच)** — Shield / Protection
 
 Together, **SagarKavach** translates to **"Ocean Shield"** or **"Maritime Defense Shield"**.
 
