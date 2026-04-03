@@ -1,0 +1,13 @@
+## 📦 Model Weights
+
+Due to GitHub file size limitations, model weights are hosted externally.
+
+Download Model:
+
+Google Drive Link:
+https://drive.google.com/file/d/1f29c_N-k5pI_hPOEvyha776IbwK_gMkF/view?usp=sharing
+
+After downloading, place file in:
+
+models/
+   └── best.pt
